@@ -9,12 +9,16 @@ public class ClientHandler implements Runnable {
     private PrintWriter out;
     private BufferedReader in;
     private String nickname;
-    private boolean ready = false;
+    private Lobby lobby;
     private List<ClientHandler> clients;
+    private Map<String, Lobby> lobbies;
+    private List<String> words;
 
-    public ClientHandler(Socket socket, List<ClientHandler> clients) {
+    public ClientHandler(Socket socket, List<ClientHandler> clients, Map<String, Lobby> lobbies, List<String> words) {
         this.socket = socket;
         this.clients = clients;
+        this.lobbies = lobbies;
+        this.words = words;
     }
 
     @Override
@@ -24,69 +28,103 @@ public class ClientHandler implements Runnable {
             out = new PrintWriter(socket.getOutputStream(), true);
 
             while (true) {
-                out.println("Enter your nickname: ");
+                out.println("Enter your nickname:");
                 nickname = in.readLine();
-                if (isNicknameUnique(nickname)) {
-                    ready = true;
+                if (nickname != null && !nickname.trim().isEmpty()) {
                     break;
-                } else {
-                    out.println("Nickname already in use. Please enter a different one.");
                 }
             }
 
-            System.out.println(nickname + " joined the game.");
-            Server.broadcast(nickname + " has joined the game.");
-            Server.sendPlayerList();
-
-            Server.checkAndStartGame();
-
-            String message;
-            while ((message = in.readLine()) != null) {
-                if (message.startsWith("PRESS") || message.startsWith("DRAG")) {
-                    if (this == Server.getCurrentDrawer()) {
-                        Server.broadcastDrawCommand("DRAW " + message, this);
-                    } else {
-                        sendMessage("You cannot draw. You are not the drawer.");
-                    }
-                } else if (Server.getCurrentDrawer() != this) {
-                    Server.handleGuess(message, this);
+            out.println("Welcome, " + nickname + "!");
+            while (true) {
+                String command = in.readLine();
+                if (command.startsWith("CREATE_LOBBY")) {
+                    String[] parts = command.split(" ", 3);
+                    String password = parts[1];
+                    int maxPlayers = Integer.parseInt(parts[2]);
+                    createLobby(password, maxPlayers);
+                } else if (command.startsWith("JOIN_LOBBY")) {
+                    String password = command.split(" ", 2)[1];
+                    joinLobby(password);
+                } else if (command.startsWith("GUESS")) {
+                    String guess = command.substring(6);
+                    handleGuess(guess);
+                } else if (command.startsWith("DRAW")) {
+                    handleDrawCommand(command);
                 } else {
-                    sendMessage("You are the drawer. You cannot guess.");
+                    handleChatMessage(command);
                 }
             }
         } catch (IOException e) {
-            System.out.println("Connection with " + nickname + " lost.");
-        } finally {
-            try {
-                socket.close();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-            clients.remove(this);
-            Server.broadcast(nickname + " has left the game.");
-            Server.sendPlayerList();
-            Server.checkAndStartGame();
+            e.printStackTrace();
         }
     }
 
-    public void sendMessage(String message) {
-        out.println(message);
+    private void createLobby(String password, int maxPlayers) {
+        synchronized (lobbies) {
+            if (!lobbies.containsKey(password)) {
+                String code = UUID.randomUUID().toString().substring(0, 6).toUpperCase();
+                lobby = new Lobby(code, password, maxPlayers, this);
+                lobbies.put(password, lobby);
+                out.println("LOBBY_CREATED " + code);
+            } else {
+                out.println("ERROR: Lobby already exists with this password.");
+            }
+        }
+    }
+
+    private void joinLobby(String password) {
+        synchronized (lobbies) {
+            Lobby lobby = lobbies.get(password);
+            if (lobby != null && !lobby.isFull()) {
+                this.lobby = lobby;
+                lobby.addPlayer(this);
+                out.println("LOBBY_JOINED");
+                lobby.broadcast(nickname + " has joined the lobby.");
+                if (lobby.isFull()) {
+                    lobby.startGame(words);
+                }
+            } else {
+                out.println("ERROR: Lobby not found or full.");
+            }
+        }
     }
 
     public String getNickname() {
         return nickname;
     }
 
-    public boolean isReady() {
-        return ready;
+    private void handleGuess(String guess) {
+        if (lobby != null) {
+            lobby.handleGuess(this, guess); // Передаем угадывание в Lobby
+        } else {
+            sendMessage("You are not in a lobby.");
+        }
     }
 
-    private boolean isNicknameUnique(String nickname) {
-        for (ClientHandler client : clients) {
-            if (client != this && client.getNickname() != null && client.getNickname().equalsIgnoreCase(nickname)) {
-                return false;
+
+
+    private void handleChatMessage(String message) {
+        if (lobby != null) {
+            if (lobby.getCurrentDrawer() != this && message.equalsIgnoreCase(lobby.getCurrentWord())) {
+                lobby.handleGuess(this, message);
+            } else {
+                lobby.broadcast(nickname + ": " + message);
             }
+        } else {
+            sendMessage("You are not in a lobby.");
         }
-        return true;
+    }
+
+    private void handleDrawCommand(String command) {
+        if (lobby != null && lobby.getCurrentDrawer() == this) {
+            lobby.broadcastToOthers(this, command);
+        } else {
+            sendMessage("You cannot draw right now.");
+        }
+    }
+
+    public void sendMessage(String message) {
+        out.println(message);
     }
 }
