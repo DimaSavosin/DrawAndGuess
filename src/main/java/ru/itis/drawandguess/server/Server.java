@@ -3,13 +3,19 @@ package ru.itis.drawandguess.server;
 import java.io.*;
 import java.net.*;
 import java.util.*;
+import java.util.concurrent.*;
 
 public class Server {
     private static final int PORT = 12345;
     private static List<ClientHandler> clients = new ArrayList<>();
-    private static List<String> words = Arrays.asList("apple", "banana", "cat", "dog", "elephant"); // Example word list
+    private static List<String> words = Arrays.asList("apple", "banana", "cat", "dog", "elephant");
     private static ClientHandler currentDrawer = null;
     private static String currentWord = null;
+    private static int currentRound = 0;
+    private static int totalRounds;
+    private static Map<ClientHandler, Integer> scores = new HashMap<>(); // Очки игроков
+    private static ScheduledExecutorService timerExecutor = Executors.newSingleThreadScheduledExecutor();
+    private static ScheduledFuture<?> currentTimer;
 
     public static void main(String[] args) {
         try (ServerSocket serverSocket = new ServerSocket(PORT)) {
@@ -21,6 +27,7 @@ public class Server {
 
                 ClientHandler clientHandler = new ClientHandler(clientSocket, clients);
                 clients.add(clientHandler);
+                scores.put(clientHandler, 0); // Инициализируем счет для нового игрока
                 new Thread(clientHandler).start();
             }
         } catch (IOException e) {
@@ -34,58 +41,115 @@ public class Server {
         }
     }
 
-    public static void sendPlayerList() {
-        StringBuilder playerList = new StringBuilder("Connected players: ");
+    public static void broadcastDrawCommand(String command, ClientHandler sender) {
         for (ClientHandler client : clients) {
-            playerList.append(client.getNickname()).append(", ");
+            if (client != sender) {
+                client.sendMessage(command);
+            }
         }
-        broadcast(playerList.toString());
     }
 
     public static synchronized void checkAndStartGame() {
-        // Check if all players are ready and there are at least two players
         if (clients.size() >= 2 && clients.stream().allMatch(ClientHandler::isReady) && currentDrawer == null) {
+            totalRounds = clients.size(); // Устанавливаем количество раундов равным количеству игроков
+            currentRound = 1;
             startGame();
         }
     }
 
     private static void startGame() {
+        if (currentRound > totalRounds) {
+            endGame();
+            return;
+        }
+
         Random random = new Random();
-        currentDrawer = clients.get(random.nextInt(clients.size()));
+        currentDrawer = clients.get((currentRound - 1) % clients.size()); // Последовательно выбираем рисующих
         currentWord = words.get(random.nextInt(words.size()));
 
         for (ClientHandler client : clients) {
             if (client == currentDrawer) {
-                client.sendMessage("You are drawing. Your word is: " + currentWord);
+                client.sendMessage("YOU_ARE_DRAWER " + currentWord);
             } else {
-                client.sendMessage("Game started! Try to guess the word.");
+                client.sendMessage("YOU_ARE_GUESSER");
             }
         }
 
-        System.out.println("Drawer: " + currentDrawer.getNickname() + ", Word: " + currentWord);
+        System.out.println("Round " + currentRound + ": Drawer: " + currentDrawer.getNickname() + ", Word: " + currentWord);
+
+        // Запуск таймера на 60 секунд
+        startTimer();
+    }
+
+    public static void handleGuess(String guess, ClientHandler guesser) {
+        if (guess.equalsIgnoreCase(currentWord)) {
+            // Останавливаем таймер
+            if (currentTimer != null) {
+                currentTimer.cancel(false);
+            }
+
+            // Увеличиваем очки угадавшего
+            scores.put(guesser, scores.get(guesser) + 1);
+            broadcast("Player " + guesser.getNickname() + " guessed the word! The word was: " + currentWord);
+            broadcast("Score update: " + getScoreBoard());
+            nextRound();
+        } else {
+            guesser.sendMessage("Incorrect guess. Try again.");
+        }
+    }
+
+    private static void startTimer() {
+        if (currentTimer != null) {
+            currentTimer.cancel(false);
+        }
+
+        currentTimer = timerExecutor.schedule(() -> {
+            broadcast("Time is up! The word was: " + currentWord);
+            nextRound();
+        }, 60, TimeUnit.SECONDS);
+
+        broadcast("You have 60 seconds to guess the word!");
     }
 
     public static void nextRound() {
-        Random random = new Random();
-        ClientHandler previousDrawer = currentDrawer;
+        currentRound++;
+        startGame();
+    }
 
-        while (true) {
-            currentDrawer = clients.get(random.nextInt(clients.size()));
-            if (currentDrawer != previousDrawer) {
-                break;
-            }
+    public static void endGame() {
+        broadcast("Game over! Thanks for playing.");
+        broadcast("Final scores: " + getScoreBoard());
+        System.out.println("Game over! All rounds completed.");
+        if (currentTimer != null) {
+            currentTimer.cancel(false);
         }
+        currentDrawer = null;
+        currentRound = 0;
+    }
 
-        currentWord = words.get(random.nextInt(words.size()));
-
+    public static void sendPlayerList() {
+        StringBuilder playerList = new StringBuilder("Connected players: ");
         for (ClientHandler client : clients) {
-            if (client == currentDrawer) {
-                client.sendMessage("You are drawing. Your word is: " + currentWord);
-            } else {
-                client.sendMessage("New round started! Try to guess the word.");
-            }
+            playerList.append(client.getNickname()).append(", ");
         }
+        if (playerList.length() > 2) { // Удалить лишнюю запятую и пробел
+            playerList.setLength(playerList.length() - 2);
+        }
+        broadcast(playerList.toString());
+    }
 
-        System.out.println("Drawer: " + currentDrawer.getNickname() + ", Word: " + currentWord);
+    public static ClientHandler getCurrentDrawer() {
+        return currentDrawer;
+    }
+
+    private static String getScoreBoard() {
+        StringBuilder scoreBoard = new StringBuilder();
+        for (Map.Entry<ClientHandler, Integer> entry : scores.entrySet()) {
+            scoreBoard.append(entry.getKey().getNickname()).append(": ").append(entry.getValue()).append(" points, ");
+        }
+        if (scoreBoard.length() > 2) {
+            scoreBoard.setLength(scoreBoard.length() - 2); // Удаляем лишнюю запятую и пробел
+        }
+        return scoreBoard.toString();
     }
 }
