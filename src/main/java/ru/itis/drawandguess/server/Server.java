@@ -84,7 +84,7 @@ public class Server {
 
     public static void addClient(ClientHandler clientHandler) {
         clients.add(clientHandler);
-        scores.put(clientHandler, 0); // По умолчанию 0 очков
+        scores.put(clientHandler, 0); 
     }
 
     public static synchronized void checkAndStartGame() {
@@ -96,7 +96,6 @@ public class Server {
     }
 
     private static void startGame() {
-        // Если уже все раунды прошли — заканчиваем
         if (currentRound > totalRounds) {
             endGame();
             return;
@@ -129,7 +128,6 @@ public class Server {
             broadcast("Score update: " + getScoreBoard());
             nextRound();
         } else {
-            // Просто рассылаем догадку всем в чат (никакого "Incorrect" не пишем)
             broadcast(guesser.getNickname() + ": " + guess);
         }
     }
@@ -153,7 +151,6 @@ public class Server {
     }
 
     public static void endGame() {
-        // Посылаем клиентам специальное сообщение о завершении игры
         broadcast("GAME_ENDED");
 
         broadcast("Game over! Thanks for playing.");
@@ -190,7 +187,6 @@ public class Server {
         return scoreBoard.toString();
     }
 
-    // ------------------- Вспомогательные методы -------------------
     public static void broadcast(String message) {
         for (ClientHandler client : clients) {
             client.sendMessage(message);

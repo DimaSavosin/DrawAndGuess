@@ -1,7 +1,6 @@
 package ru.itis.drawandguess.gameInterface;
 
-import javafx.animation.KeyFrame;
-import javafx.animation.Timeline;
+import javafx.animation.*;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.geometry.Insets;
@@ -39,9 +38,8 @@ public class ClientFX extends Application {
     private Button clearButton;
     private Canvas canvas;
     private Label wordLabel;
-
-
     private Label timerLabel;
+
     private Timeline roundTimer;
     private int timeLeft;
 
@@ -50,37 +48,46 @@ public class ClientFX extends Application {
 
     private Stage primaryStage;
 
+    // Храним ссылку на анимацию пульсации, чтобы её можно было остановить
+    private ScaleTransition pulseAnimation;
+
     @Override
     public void start(Stage primaryStage) {
         this.primaryStage = primaryStage;
         primaryStage.setTitle("Draw & Guess Client");
 
         Scene lobbyScene = createLobbyScene();
+        lobbyScene.getStylesheets().add(getClass().getResource("/style.css").toExternalForm());
         primaryStage.setScene(lobbyScene);
         primaryStage.show();
     }
 
     private Scene createLobbyScene() {
+        GridPane grid = new GridPane();
+        grid.setHgap(10);
+        grid.setVgap(10);
+        grid.setPadding(new Insets(20));
+
         Label createLobbyLabel = new Label("Создать лобби:");
         createLobbyPasswordField = new TextField();
         createLobbyPasswordField.setPromptText("Пароль лобби");
+
         createLobbyPlayerCountBox = new ComboBox<>();
         createLobbyPlayerCountBox.getItems().addAll(2, 3, 4);
         createLobbyPlayerCountBox.setValue(2);
+        createLobbyPlayerCountBox.getStyleClass().add("combo-box");
+
         createLobbyButton = new Button("Создать");
+        createLobbyButton.setMinWidth(140);
 
         Label joinLobbyLabel = new Label("Присоединиться:");
         joinLobbyPasswordField = new TextField();
         joinLobbyPasswordField.setPromptText("Пароль лобби");
         joinLobbyButton = new Button("Присоединиться");
+        joinLobbyButton.setMinWidth(140);
 
         createLobbyButton.setOnAction(e -> onCreateLobby());
         joinLobbyButton.setOnAction(e -> onJoinLobby());
-
-        GridPane grid = new GridPane();
-        grid.setHgap(10);
-        grid.setVgap(10);
-        grid.setPadding(new Insets(20));
 
         grid.add(createLobbyLabel, 0, 0);
         grid.add(createLobbyPasswordField, 1, 0);
@@ -91,7 +98,9 @@ public class ClientFX extends Application {
         grid.add(joinLobbyPasswordField, 1, 1);
         grid.add(joinLobbyButton, 3, 1);
 
-        return new Scene(grid, 500, 150);
+        Scene scene = new Scene(grid, 575, 150);
+        scene.getStylesheets().add(getClass().getResource("/style.css").toExternalForm());
+        return scene;
     }
 
     private void onCreateLobby() {
@@ -178,7 +187,7 @@ public class ClientFX extends Application {
         VBox vbox = new VBox(10, label, nicknameField, nicknameOkButton);
         vbox.setPadding(new Insets(20));
         Scene nicknameScene = new Scene(vbox, 300, 120);
-
+        nicknameScene.getStylesheets().add(getClass().getResource("/style.css").toExternalForm());
         primaryStage.setScene(nicknameScene);
 
         nicknameOkButton.setOnAction(e -> {
@@ -241,11 +250,10 @@ public class ClientFX extends Application {
         setupDrawing(gc);
 
         wordLabel = new Label("Waiting for the game to start...");
-        wordLabel.setStyle("-fx-background-color: lightgray; -fx-padding: 5px; -fx-font-size: 14px;");
-        wordLabel.setMaxWidth(Double.MAX_VALUE);
+        wordLabel.getStyleClass().add("word-label");
 
         timerLabel = new Label("Time left: --");
-        timerLabel.setStyle("-fx-text-fill: darkred; -fx-font-size: 14px;");
+        timerLabel.getStyleClass().add("timer-label");
 
         VBox chatBox = new VBox(
                 10,
@@ -257,7 +265,8 @@ public class ClientFX extends Application {
 
         StackPane canvasPane = new StackPane(canvas);
 
-        VBox canvasBox = new VBox(5, wordLabel, timerLabel, canvasPane);
+        VBox canvasBox = new VBox(5, wordLabel, timerLabel, canvasPane, clearButton);
+        canvasBox.getStyleClass().add("canvas-box");
         VBox.setVgrow(canvasPane, Priority.ALWAYS);
 
         SplitPane mainSplitPane = new SplitPane();
@@ -268,6 +277,7 @@ public class ClientFX extends Application {
         root.setCenter(mainSplitPane);
 
         Scene gameScene = new Scene(root, 900, 600);
+        gameScene.getStylesheets().add(getClass().getResource("/style.css").toExternalForm());
         primaryStage.setScene(gameScene);
         primaryStage.show();
 
@@ -314,7 +324,6 @@ public class ClientFX extends Application {
         }
         else if (serverMessage.startsWith("DRAW")) {
             Platform.runLater(() -> handleDrawCommand(serverMessage));
-
         }
         else if (serverMessage.startsWith("YOU_ARE_DRAWER")) {
             String[] parts = serverMessage.split(" ", 2);
@@ -344,13 +353,19 @@ public class ClientFX extends Application {
         else if (serverMessage.startsWith("Time is up!")) {
             stopCurrentTimer();
             Platform.runLater(() -> timerLabel.setText("Time is up!"));
-
             Platform.runLater(() -> chatArea.appendText(serverMessage + "\n"));
         }
+        // ------------------------------
+        // Реализуем всплывающий эффект:
+        // Когда кто-то угадал слово: "guessed the word!"
         else if (serverMessage.contains("guessed the word!")) {
             stopCurrentTimer();
-            Platform.runLater(() -> chatArea.appendText(serverMessage + "\n"));
+            Platform.runLater(() -> {
+                chatArea.appendText(serverMessage + "\n");
+                bounceChatArea();  // <-- вызываем метод анимации
+            });
         }
+        // ------------------------------
         else {
             Platform.runLater(() -> chatArea.appendText(serverMessage + "\n"));
         }
@@ -389,10 +404,11 @@ public class ClientFX extends Application {
     private void sendMessage() {
         String message = messageField.getText().trim();
         if (!message.isEmpty() && out != null) {
-            out.println(message);  // отправляем на сервер
+            out.println(message);
             messageField.clear();
         }
     }
+
     private void clearCanvas() {
         Platform.runLater(() -> {
             GraphicsContext gc = canvas.getGraphicsContext2D();
@@ -401,8 +417,35 @@ public class ClientFX extends Application {
         });
     }
 
+    /**
+     * Запускаем бесконечную пульсацию с увеличением,
+     * пока не остановим явно.
+     */
+    private void startPulseTimerLabel() {
+        if (pulseAnimation != null) {
+            return;
+        }
+        pulseAnimation = new ScaleTransition(Duration.millis(500), timerLabel);
+        pulseAnimation.setFromX(1.0);
+        pulseAnimation.setToX(1.2);
+        pulseAnimation.setFromY(1.0);
+        pulseAnimation.setToY(1.2);
+        pulseAnimation.setAutoReverse(true);
+        pulseAnimation.setCycleCount(Animation.INDEFINITE);
+        pulseAnimation.play();
+    }
+
+    private void stopPulseTimerLabel() {
+        if (pulseAnimation != null) {
+            pulseAnimation.stop();
+            timerLabel.setScaleX(1.0);
+            timerLabel.setScaleY(1.0);
+            pulseAnimation = null;
+        }
+    }
+
     private void startCountdown(int seconds) {
-        stopCurrentTimer(); // если уже шёл таймер - останавливаем
+        stopCurrentTimer();
         timeLeft = seconds;
         timerLabel.setText("Time left: " + timeLeft);
 
@@ -411,8 +454,12 @@ public class ClientFX extends Application {
             if (timeLeft <= 0) {
                 roundTimer.stop();
                 timerLabel.setText("Time is up!");
+                stopPulseTimerLabel();
             } else {
                 timerLabel.setText("Time left: " + timeLeft);
+                if (timeLeft == 10) {
+                    startPulseTimerLabel();
+                }
             }
         }));
         roundTimer.setCycleCount(seconds);
@@ -424,7 +471,9 @@ public class ClientFX extends Application {
             roundTimer.stop();
             roundTimer = null;
         }
+        stopPulseTimerLabel();
     }
+
     private void handleDrawCommand(String command) {
         String[] parts = command.split(" ");
         if (parts.length < 3) {
@@ -439,12 +488,27 @@ public class ClientFX extends Application {
                 gc.moveTo(Double.parseDouble(parts[2]), Double.parseDouble(parts[3]));
                 gc.stroke();
                 break;
-
             case "DRAG":
                 gc.lineTo(Double.parseDouble(parts[2]), Double.parseDouble(parts[3]));
                 gc.stroke();
                 break;
         }
+    }
+
+    /**
+     * "Всплывающий" эффект (прыжок) для области чата,
+     * когда кто-то угадал слово.
+     */
+    private void bounceChatArea() {
+        // Простой ScaleTransition: увеличиваем в 1.2 раза, возвращаем назад
+        ScaleTransition scale = new ScaleTransition(Duration.millis(400), chatArea);
+        scale.setFromX(1.0);
+        scale.setToX(1.2);
+        scale.setFromY(1.0);
+        scale.setToY(1.2);
+        scale.setCycleCount(2);
+        scale.setAutoReverse(true);
+        scale.play();
     }
 
     private void showAlert(String title, String message) {
