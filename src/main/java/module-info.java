@@ -7,6 +7,7 @@ module ru.itis.drawandguess {
     requires org.kordamp.bootstrapfx.core;
 
     opens ru.itis.drawandguess to javafx.fxml;
-    exports ru.itis.drawandguess.gameInterface to javafx.graphics;
     exports ru.itis.drawandguess;
+    exports ru.itis.drawandguess.gameInterface to javafx.graphics;
 }
+

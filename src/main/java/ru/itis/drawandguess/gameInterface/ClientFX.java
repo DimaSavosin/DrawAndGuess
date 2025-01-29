@@ -14,11 +14,11 @@ import javafx.scene.paint.Color;
 import javafx.stage.Stage;
 import javafx.util.Duration;
 
-import java.io.*;
-import java.net.Socket;
+import java.io.IOException;
 
 public class ClientFX extends Application {
 
+    // Поля UI
     private TextField createLobbyPasswordField;
     private TextField joinLobbyPasswordField;
     private ComboBox<Integer> createLobbyPlayerCountBox;
@@ -27,10 +27,6 @@ public class ClientFX extends Application {
 
     private TextField nicknameField;
     private Button nicknameOkButton;
-
-    private Socket socket;
-    private BufferedReader in;
-    private PrintWriter out;
 
     private TextArea chatArea;
     private TextField messageField;
@@ -42,14 +38,13 @@ public class ClientFX extends Application {
 
     private Timeline roundTimer;
     private int timeLeft;
-
     private boolean isDrawer = false;
     private boolean gameEnded = false;
 
     private Stage primaryStage;
+    private NetworkClient networkClient; // Сетевой клиент (отдельный класс)
 
-    // Храним ссылку на анимацию пульсации, чтобы её можно было остановить
-    private ScaleTransition pulseAnimation;
+    private ScaleTransition pulseAnimation; // Анимация таймера
 
     @Override
     public void start(Stage primaryStage) {
@@ -62,6 +57,9 @@ public class ClientFX extends Application {
         primaryStage.show();
     }
 
+    /**
+     * Создаём сцену для создания/подключения к лобби.
+     */
     private Scene createLobbyScene() {
         GridPane grid = new GridPane();
         grid.setHgap(10);
@@ -75,7 +73,6 @@ public class ClientFX extends Application {
         createLobbyPlayerCountBox = new ComboBox<>();
         createLobbyPlayerCountBox.getItems().addAll(2, 3, 4);
         createLobbyPlayerCountBox.setValue(2);
-        createLobbyPlayerCountBox.getStyleClass().add("combo-box");
 
         createLobbyButton = new Button("Создать");
         createLobbyButton.setMinWidth(140);
@@ -99,7 +96,9 @@ public class ClientFX extends Application {
         grid.add(joinLobbyButton, 3, 1);
 
         Scene scene = new Scene(grid, 575, 150);
-        scene.getStylesheets().add(getClass().getResource("/style.css").toExternalForm());
+        scene.getStylesheets().add(
+                getClass().getResource("/style.css").toExternalForm()
+        );
         return scene;
     }
 
@@ -115,12 +114,13 @@ public class ClientFX extends Application {
             return;
         }
 
-        out.println("CREATE LOBBY " + password + " " + maxPlayers);
+        networkClient.sendMessage("CREATE LOBBY " + password + " " + maxPlayers);
+
         try {
-            String response = in.readLine();
+            String response = networkClient.readLine();
             if (response == null) {
                 showAlert("Ошибка", "Сервер не отвечает при создании лобби.");
-                socket.close();
+                networkClient.close();
                 return;
             }
 
@@ -128,7 +128,8 @@ public class ClientFX extends Application {
                 showNicknameDialog();
             } else {
                 showAlert("Ошибка при создании лобби", response);
-                socket.close();
+                networkClient.close();
+                networkClient = null;
             }
         } catch (IOException ex) {
             showAlert("Ошибка", "Не удалось прочитать ответ сервера.");
@@ -147,19 +148,22 @@ public class ClientFX extends Application {
             return;
         }
 
-        out.println("JOIN LOBBY " + password);
+        networkClient.sendMessage("JOIN LOBBY " + password);
+
         try {
-            String response = in.readLine();
+            String response = networkClient.readLine();
             if (response == null) {
                 showAlert("Ошибка", "Сервер не отвечает при присоединении к лобби.");
-                socket.close();
+                networkClient.close();
+                networkClient = null;
                 return;
             }
             if (response.startsWith("OK")) {
                 showNicknameDialog();
             } else {
                 showAlert("Ошибка при присоединении", response);
-                socket.close();
+                networkClient.close();
+                networkClient = null;
             }
         } catch (IOException ex) {
             showAlert("Ошибка", "Не удалось прочитать ответ сервера.");
@@ -167,18 +171,24 @@ public class ClientFX extends Application {
         }
     }
 
+    /**
+     * Подключаемся к серверу (создаём networkClient), если ещё не подключались.
+     */
     private boolean connectToServer() {
-        try {
-            socket = new Socket("127.0.0.1", 12345);
-            in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-            out = new PrintWriter(socket.getOutputStream(), true);
-            return true;
-        } catch (IOException ex) {
-            showAlert("Ошибка", "Невозможно подключиться к серверу.");
-            return false;
+        if (networkClient == null) {
+            networkClient = new NetworkClient("127.0.0.1", 12345);
+            if (!networkClient.connect()) {
+                showAlert("Ошибка", "Не удалось подключиться к серверу.");
+                networkClient = null;
+                return false;
+            }
         }
+        return true;
     }
 
+    /**
+     * Окно для ввода ника.
+     */
     private void showNicknameDialog() {
         Label label = new Label("Введите ваш ник:");
         nicknameField = new TextField();
@@ -196,39 +206,18 @@ public class ClientFX extends Application {
                 showAlert("Ошибка", "Ник не может быть пустым!");
                 return;
             }
-            out.println(nickname);
+            networkClient.sendMessage(nickname);
 
-            new Thread(() -> {
-                try {
-                    while (true) {
-                        String serverMessage = in.readLine();
-                        if (serverMessage == null) {
-                            // сервер закрыл соединение
-                            Platform.runLater(() -> {
-                                showAlert("Ошибка", "Соединение с сервером потеряно.");
-                                primaryStage.setScene(createLobbyScene());
-                            });
-                            break;
-                        }
-                        if (serverMessage.startsWith("Nickname already in use")) {
-                            Platform.runLater(() -> {
-                                showAlert("Ошибка", serverMessage);
-                            });
-                            break;
-                        }
-                        Platform.runLater(() -> createGameScene());
-                        break;
-                    }
-                } catch (IOException ex) {
-                    Platform.runLater(() -> {
-                        showAlert("Ошибка", "Ошибка при чтении данных от сервера.");
-                        primaryStage.setScene(createLobbyScene());
-                    });
-                }
-            }).start();
+            // ВАЖНО: Сразу идём в GameScene,
+            // дальнейшие сообщения (включая Nickname already in use)
+            // обрабатываем в startServerListener() -> handleServerMessage()
+            createGameScene();
         });
     }
 
+    /**
+     * Переход в основную игровую сцену.
+     */
     private void createGameScene() {
         gameEnded = false;
 
@@ -281,93 +270,93 @@ public class ClientFX extends Application {
         primaryStage.setScene(gameScene);
         primaryStage.show();
 
-        new Thread(this::listenServerMessages).start();
+        // Включаем фон. поток, который читает всё, что пришлёт сервер.
+        startServerListener();
     }
 
-    private void listenServerMessages() {
-        try {
-            String serverMessage;
-            while ((serverMessage = in.readLine()) != null) {
-                handleServerMessage(serverMessage);
+    /**
+     * Поток для чтения входящих сообщений.
+     */
+    private void startServerListener() {
+        new Thread(() -> {
+            try {
+                String serverMessage;
+                while ((serverMessage = networkClient.readLine()) != null) {
+                    final String msg = serverMessage;
+                    Platform.runLater(() -> handleServerMessage(msg));
+                }
+            } catch (IOException e) {
+                Platform.runLater(() -> chatArea.appendText("Disconnected from server.\n"));
             }
-        } catch (IOException e) {
-            Platform.runLater(() -> chatArea.appendText("Disconnected from server.\n"));
-        }
+        }).start();
     }
 
+    /**
+     * Обработка сообщений в главном (UI) потоке.
+     */
     private void handleServerMessage(String serverMessage) {
         if (serverMessage.equals("GAME_ENDED")) {
             gameEnded = true;
-            Platform.runLater(() -> {
-                isDrawer = false;
-                clearButton.setDisable(true);
-                wordLabel.setText("Game has ended!");
+            isDrawer = false;
+            clearButton.setDisable(true);
+            wordLabel.setText("Game has ended!");
 
-                showAlert("Information",
-                        "Game ended! You will be returned to the main menu in 5 seconds...");
+            showAlert("Information",
+                    "Game ended! Вы будете возвращены в главное меню через 5 секунд...");
 
-                Timeline timeline = new Timeline(
-                        new KeyFrame(Duration.seconds(5), ev -> {
-                            try {
-                                if (socket != null && !socket.isClosed()) {
-                                    socket.close();
-                                }
-                            } catch (IOException ex) {
-                                ex.printStackTrace();
-                            }
-                            primaryStage.setScene(createLobbyScene());
-                        })
-                );
-                timeline.setCycleCount(1);
-                timeline.play();
-            });
+            Timeline timeline = new Timeline(
+                    new KeyFrame(Duration.seconds(5), ev -> {
+                        networkClient.close();
+                        networkClient = null;
+                        primaryStage.setScene(createLobbyScene());
+                    })
+            );
+            timeline.setCycleCount(1);
+            timeline.play();
+        }
+        else if (serverMessage.startsWith("Nickname already in use")) {
+            // Если кто-то пытается использовать уже занятый ник
+            showAlert("Ошибка", serverMessage);
+            networkClient.close();
+            networkClient = null;
+            primaryStage.setScene(createLobbyScene());
         }
         else if (serverMessage.startsWith("DRAW")) {
-            Platform.runLater(() -> handleDrawCommand(serverMessage));
+            handleDrawCommand(serverMessage);
         }
         else if (serverMessage.startsWith("YOU_ARE_DRAWER")) {
             String[] parts = serverMessage.split(" ", 2);
             if (parts.length > 1) {
-                Platform.runLater(() -> {
-                    isDrawer = true;
-                    if (!gameEnded) {
-                        clearButton.setDisable(false);
-                    }
-                    wordLabel.setText("Word to draw: " + parts[1]);
-                });
+                isDrawer = true;
+                if (!gameEnded) {
+                    clearButton.setDisable(false);
+                }
+                wordLabel.setText("Word to draw: " + parts[1]);
             }
         }
         else if (serverMessage.startsWith("YOU_ARE_GUESSER")) {
-            Platform.runLater(() -> {
-                isDrawer = false;
-                clearButton.setDisable(true);
-                wordLabel.setText("Guess the word!");
-            });
+            isDrawer = false;
+            clearButton.setDisable(true);
+            wordLabel.setText("Guess the word!");
         }
         else if (serverMessage.equals("CLEAR_CANVAS")) {
             clearCanvas();
         }
-        else if (serverMessage.startsWith("You have 60 seconds to guess the word!")) {
-            Platform.runLater(() -> startCountdown(60));
+        else if (serverMessage.startsWith("You have 60 seconds")) {
+            startCountdown(60);
         }
         else if (serverMessage.startsWith("Time is up!")) {
             stopCurrentTimer();
-            Platform.runLater(() -> timerLabel.setText("Time is up!"));
-            Platform.runLater(() -> chatArea.appendText(serverMessage + "\n"));
+            timerLabel.setText("Time is up!");
+            chatArea.appendText(serverMessage + "\n");
         }
-        // ------------------------------
-        // Реализуем всплывающий эффект:
-        // Когда кто-то угадал слово: "guessed the word!"
         else if (serverMessage.contains("guessed the word!")) {
             stopCurrentTimer();
-            Platform.runLater(() -> {
-                chatArea.appendText(serverMessage + "\n");
-                bounceChatArea();  // <-- вызываем метод анимации
-            });
+            chatArea.appendText(serverMessage + "\n");
+            bounceChatArea();
         }
-        // ------------------------------
         else {
-            Platform.runLater(() -> chatArea.appendText(serverMessage + "\n"));
+            chatArea.appendText(serverMessage + "\n");
         }
     }
 
@@ -377,70 +366,39 @@ public class ClientFX extends Application {
                 gc.beginPath();
                 gc.moveTo(e.getX(), e.getY());
                 gc.stroke();
-                sendDrawCommand("PRESS " + e.getX() + " " + e.getY());
+                networkClient.sendMessage("PRESS " + e.getX() + " " + e.getY());
             }
         });
         canvas.addEventHandler(MouseEvent.MOUSE_DRAGGED, e -> {
             if (isDrawer && !gameEnded) {
                 gc.lineTo(e.getX(), e.getY());
                 gc.stroke();
-                sendDrawCommand("DRAG " + e.getX() + " " + e.getY());
+                networkClient.sendMessage("DRAG " + e.getX() + " " + e.getY());
             }
         });
 
         clearButton.setOnAction(e -> {
-            if (!gameEnded && out != null) {
-                out.println("CLEAR_REQUEST");
+            if (!gameEnded) {
+                networkClient.sendMessage("CLEAR_REQUEST");
             }
         });
     }
 
-    private void sendDrawCommand(String command) {
-        if (out != null) {
-            out.println(command);
-        }
-    }
+    private void handleDrawCommand(String command) {
+        String[] parts = command.split(" ");
+        if (parts.length < 3) return;
 
-    private void sendMessage() {
-        String message = messageField.getText().trim();
-        if (!message.isEmpty() && out != null) {
-            out.println(message);
-            messageField.clear();
-        }
-    }
-
-    private void clearCanvas() {
-        Platform.runLater(() -> {
-            GraphicsContext gc = canvas.getGraphicsContext2D();
-            gc.setFill(Color.WHITE);
-            gc.fillRect(0, 0, canvas.getWidth(), canvas.getHeight());
-        });
-    }
-
-    /**
-     * Запускаем бесконечную пульсацию с увеличением,
-     * пока не остановим явно.
-     */
-    private void startPulseTimerLabel() {
-        if (pulseAnimation != null) {
-            return;
-        }
-        pulseAnimation = new ScaleTransition(Duration.millis(500), timerLabel);
-        pulseAnimation.setFromX(1.0);
-        pulseAnimation.setToX(1.2);
-        pulseAnimation.setFromY(1.0);
-        pulseAnimation.setToY(1.2);
-        pulseAnimation.setAutoReverse(true);
-        pulseAnimation.setCycleCount(Animation.INDEFINITE);
-        pulseAnimation.play();
-    }
-
-    private void stopPulseTimerLabel() {
-        if (pulseAnimation != null) {
-            pulseAnimation.stop();
-            timerLabel.setScaleX(1.0);
-            timerLabel.setScaleY(1.0);
-            pulseAnimation = null;
+        GraphicsContext gc = canvas.getGraphicsContext2D();
+        switch (parts[1]) {
+            case "PRESS" -> {
+                gc.beginPath();
+                gc.moveTo(Double.parseDouble(parts[2]), Double.parseDouble(parts[3]));
+                gc.stroke();
+            }
+            case "DRAG" -> {
+                gc.lineTo(Double.parseDouble(parts[2]), Double.parseDouble(parts[3]));
+                gc.stroke();
+            }
         }
     }
 
@@ -474,33 +432,30 @@ public class ClientFX extends Application {
         stopPulseTimerLabel();
     }
 
-    private void handleDrawCommand(String command) {
-        String[] parts = command.split(" ");
-        if (parts.length < 3) {
-            return; // Неверный формат команды
+    private void startPulseTimerLabel() {
+        if (pulseAnimation != null) {
+            return;
         }
+        pulseAnimation = new ScaleTransition(Duration.millis(500), timerLabel);
+        pulseAnimation.setFromX(1.0);
+        pulseAnimation.setToX(1.2);
+        pulseAnimation.setFromY(1.0);
+        pulseAnimation.setToY(1.2);
+        pulseAnimation.setAutoReverse(true);
+        pulseAnimation.setCycleCount(Animation.INDEFINITE);
+        pulseAnimation.play();
+    }
 
-        GraphicsContext gc = canvas.getGraphicsContext2D();
-
-        switch (parts[1]) {
-            case "PRESS":
-                gc.beginPath();
-                gc.moveTo(Double.parseDouble(parts[2]), Double.parseDouble(parts[3]));
-                gc.stroke();
-                break;
-            case "DRAG":
-                gc.lineTo(Double.parseDouble(parts[2]), Double.parseDouble(parts[3]));
-                gc.stroke();
-                break;
+    private void stopPulseTimerLabel() {
+        if (pulseAnimation != null) {
+            pulseAnimation.stop();
+            timerLabel.setScaleX(1.0);
+            timerLabel.setScaleY(1.0);
+            pulseAnimation = null;
         }
     }
 
-    /**
-     * "Всплывающий" эффект (прыжок) для области чата,
-     * когда кто-то угадал слово.
-     */
     private void bounceChatArea() {
-        // Простой ScaleTransition: увеличиваем в 1.2 раза, возвращаем назад
         ScaleTransition scale = new ScaleTransition(Duration.millis(400), chatArea);
         scale.setFromX(1.0);
         scale.setToX(1.2);
@@ -511,12 +466,33 @@ public class ClientFX extends Application {
         scale.play();
     }
 
+    private void sendMessage() {
+        String message = messageField.getText().trim();
+        if (!message.isEmpty()) {
+            networkClient.sendMessage(message);
+            messageField.clear();
+        }
+    }
+
+    private void clearCanvas() {
+        GraphicsContext gc = canvas.getGraphicsContext2D();
+        gc.setFill(Color.WHITE);
+        gc.fillRect(0, 0, canvas.getWidth(), canvas.getHeight());
+    }
+
     private void showAlert(String title, String message) {
         Alert alert = new Alert(Alert.AlertType.INFORMATION);
         alert.setTitle(title);
         alert.setHeaderText(null);
         alert.setContentText(message);
         alert.show();
+    }
+
+    @Override
+    public void stop() {
+        if (networkClient != null) {
+            networkClient.close();
+        }
     }
 
     public static void main(String[] args) {

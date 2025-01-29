@@ -1,49 +1,43 @@
 package ru.itis.drawandguess.server;
 
-import java.io.*;
-import java.net.*;
+import java.io.IOException;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.util.*;
 import java.util.concurrent.*;
 
 public class Server {
-    private static final int PORT = 12345;
+    private int port;
+    private List<ClientHandler> clients;
+    private ScheduledExecutorService timerExecutor;
 
-    private static List<ClientHandler> clients = new ArrayList<>();
+    // Через композицию будем иметь ссылки на управляющие объекты:
+    private LobbyManager lobbyManager;
+    private GameManager gameManager;
 
-    private static List<String> words;
+    // Конструктор
+    public Server(int port) {
+        this.port = port;
+        this.clients = Collections.synchronizedList(new ArrayList<>());
+        this.timerExecutor = Executors.newSingleThreadScheduledExecutor();
 
-    private static ClientHandler currentDrawer = null;
-    private static String currentWord = null;
+        // Создаем наши объекты по SRP
+        WordRepository wordRepository = new WordRepository("src/main/resources/words.txt");
+        this.lobbyManager = new LobbyManager();
+        this.gameManager = new GameManager(wordRepository, timerExecutor, this);
+    }
 
-    private static int currentRound = 0;
-    private static int totalRounds;
-
-    private static Map<ClientHandler, Integer> scores = new HashMap<>();
-
-    private static ScheduledExecutorService timerExecutor = Executors.newSingleThreadScheduledExecutor();
-    private static ScheduledFuture<?> currentTimer;
-
-    private static boolean lobbyCreated = false;
-    private static String lobbyPassword = null;
-    private static int maxPlayers = 0;
-
-    private static boolean gameEnded = false;
-
-    public static void main(String[] args) {
-        words = loadWordsFromFile();
-        if (words.isEmpty()) {
-            System.err.println("No words available for the game. Please check words.txt.");
-            System.exit(1);
-        }
-
-        try (ServerSocket serverSocket = new ServerSocket(PORT)) {
-            System.out.println("Server started on port " + PORT);
+    public void start() {
+        try (ServerSocket serverSocket = new ServerSocket(port)) {
+            System.out.println("Server started on port " + port);
 
             while (true) {
                 Socket clientSocket = serverSocket.accept();
                 System.out.println("New client connected: " + clientSocket.getInetAddress());
 
-                ClientHandler clientHandler = new ClientHandler(clientSocket, clients);
+                // Создаем ClientHandler и передаем ему ссылку на себя,
+                // чтобы он мог вызывать методы broadcast(), lobbyManager и т.д.
+                ClientHandler clientHandler = new ClientHandler(clientSocket, this);
                 new Thread(clientHandler).start();
             }
         } catch (IOException e) {
@@ -51,181 +45,155 @@ public class Server {
         }
     }
 
-    private static List<String> loadWordsFromFile() {
-        List<String> loadedWords = new ArrayList<>();
-        try (BufferedReader reader = new BufferedReader(new FileReader("src/main/resources/words.txt"))) {
-            String word;
-            while ((word = reader.readLine()) != null) {
-                loadedWords.add(word.trim());
-            }
-        } catch (IOException e) {
-            System.err.println("Error reading words from file: " + e.getMessage());
+    // ===== Методы, вызываемые из ClientHandler =====
+
+    /**
+     * Попытка создать лобби.
+     */
+    public synchronized boolean tryCreateLobby(String password, int maxPlayers) {
+        if (lobbyManager.isLobbyCreated()) {
+            return false; // Уже создано
         }
-        return loadedWords;
+        // Создаем
+        lobbyManager.createLobby(password, maxPlayers);
+        return true;
     }
 
-    public static boolean isLobbyCreated() {
-        return lobbyCreated;
+    /**
+     * Попытка присоединиться к лобби по паролю.
+     */
+    public synchronized boolean tryJoinLobby(String password) {
+        if (!lobbyManager.isLobbyCreated()) {
+            return false; // лобби еще нет
+        }
+        if (!lobbyManager.checkLobbyPassword(password)) {
+            return false; // неверный пароль
+        }
+        // иначе OK
+        return true;
     }
 
-    public static void createLobby(String password, int maxPlayersCount) {
-        lobbyCreated = true;
-        lobbyPassword = password;
-        maxPlayers = maxPlayersCount;
+    public int getMaxPlayers() {
+        return lobbyManager.getMaxPlayers();
     }
 
-    public static boolean checkLobbyPassword(String password) {
-        return lobbyPassword != null && lobbyPassword.equals(password);
-    }
-
-    public static int getMaxPlayers() {
-        return maxPlayers;
-    }
-
-    public static void addClient(ClientHandler clientHandler) {
+    /**
+     * Добавляем клиента и проверяем, не пора ли стартовать игру.
+     */
+    public synchronized void addClient(ClientHandler clientHandler) {
         clients.add(clientHandler);
-        scores.put(clientHandler, 0); 
+        gameManager.registerPlayer(clientHandler);
+
+        checkAndStartGame();
     }
 
-    public static synchronized void checkAndStartGame() {
-        if (lobbyCreated && currentDrawer == null && clients.size() == maxPlayers && !gameEnded) {
-            totalRounds = clients.size();
-            currentRound = 1;
-            startGame();
+    /**
+     * Удаляем клиента (когда он отключается).
+     * Если список опустел – сброс лобби и игры.
+     */
+    public synchronized void removeClient(ClientHandler clientHandler) {
+        clients.remove(clientHandler);
+        gameManager.removePlayer(clientHandler);
+
+        broadcast(clientHandler.getNickname() + " has left the game.");
+        sendPlayerList();
+
+        checkAndStartGame();  // возможно, кто-то ушел, а кто-то остался.
+
+        // Если всех клиентов нет – сброс лобби
+        if (clients.isEmpty()) {
+            System.out.println("All players have left. Resetting lobby and game data...");
+            broadcast("All players left. The lobby is reset.");
+            lobbyManager.resetLobby();
+            gameManager.resetGame();
         }
     }
 
-    private static void startGame() {
-        if (currentRound > totalRounds) {
-            endGame();
-            return;
-        }
-
-        Random random = new Random();
-        currentDrawer = clients.get((currentRound - 1) % clients.size());
-        currentWord = words.get(random.nextInt(words.size()));
-
-        for (ClientHandler client : clients) {
-            if (client == currentDrawer) {
-                client.sendMessage("YOU_ARE_DRAWER " + currentWord);
-            } else {
-                client.sendMessage("YOU_ARE_GUESSER");
-            }
-        }
-
-        System.out.println("Round " + currentRound + ": Drawer: " + currentDrawer.getNickname()
-                + ", Word: " + currentWord);
-        startTimer();
-    }
-
-    public static void handleGuess(String guess, ClientHandler guesser) {
-        if (guess.equalsIgnoreCase(currentWord)) {
-            if (currentTimer != null) {
-                currentTimer.cancel(false);
-            }
-            scores.put(guesser, scores.get(guesser) + 1);
-            broadcast("Player " + guesser.getNickname() + " guessed the word! The word was: " + currentWord);
-            broadcast("Score update: " + getScoreBoard());
-            nextRound();
-        } else {
-            broadcast(guesser.getNickname() + ": " + guess);
+    /**
+     * Проверяем, достаточно ли игроков, чтобы начать игру.
+     */
+    private synchronized void checkAndStartGame() {
+        if (lobbyManager.isLobbyCreated()
+                && !gameManager.isGameInProgress()
+                && clients.size() == lobbyManager.getMaxPlayers()
+                && !gameManager.isGameEnded())
+        {
+            gameManager.startGame();
         }
     }
 
-    private static void startTimer() {
-        if (currentTimer != null) {
-            currentTimer.cancel(false);
-        }
-        currentTimer = timerExecutor.schedule(() -> {
-            broadcast("Time is up! The word was: " + currentWord);
-            nextRound();
-        }, 60, TimeUnit.SECONDS);
+    // ===== Методы для отправки сообщений всем клиентам =====
 
-        broadcast("You have 60 seconds to guess the word!");
-    }
-
-    public static void nextRound() {
-        broadcast("CLEAR_CANVAS");
-        currentRound++;
-        startGame();
-    }
-
-    public static void endGame() {
-        broadcast("GAME_ENDED");
-
-        broadcast("Game over! Thanks for playing.");
-        broadcast("Final scores: " + getScoreBoard());
-        System.out.println("Game over! All rounds completed.");
-
-        if (currentTimer != null) {
-            currentTimer.cancel(false);
-        }
-        currentDrawer = null;
-        currentRound = 0;
-        gameEnded = true;
-    }
-
-    public static boolean isGameEnded() {
-        return gameEnded;
-    }
-
-    public static ClientHandler getCurrentDrawer() {
-        return currentDrawer;
-    }
-
-    private static String getScoreBoard() {
-        StringBuilder scoreBoard = new StringBuilder();
-        for (Map.Entry<ClientHandler, Integer> entry : scores.entrySet()) {
-            scoreBoard.append(entry.getKey().getNickname())
-                    .append(": ")
-                    .append(entry.getValue())
-                    .append(" points, ");
-        }
-        if (scoreBoard.length() > 2) {
-            scoreBoard.setLength(scoreBoard.length() - 2);
-        }
-        return scoreBoard.toString();
-    }
-
-    public static void broadcast(String message) {
-        for (ClientHandler client : clients) {
-            client.sendMessage(message);
-        }
-    }
-
-    public static void broadcastDrawCommand(String command, ClientHandler sender) {
-        for (ClientHandler client : clients) {
-            if (client != sender) {
-                client.sendMessage(command);
+    public void broadcast(String message) {
+        synchronized (clients) {
+            for (ClientHandler client : clients) {
+                client.sendMessage(message);
             }
         }
     }
 
-    public static void sendPlayerList() {
+    /**
+     * Отправить команду рисования всем, кроме отправителя
+     */
+    public void broadcastDrawCommand(String command, ClientHandler sender) {
+        synchronized (clients) {
+            for (ClientHandler client : clients) {
+                if (client != sender) {
+                    client.sendMessage(command);
+                }
+            }
+        }
+    }
+
+    /**
+     * Вывести список игроков
+     */
+    public void sendPlayerList() {
         StringBuilder playerList = new StringBuilder("Connected players: ");
-        for (ClientHandler client : clients) {
-            playerList.append(client.getNickname()).append(", ");
+        synchronized (clients) {
+            for (ClientHandler client : clients) {
+                playerList.append(client.getNickname()).append(", ");
+            }
         }
         if (playerList.length() > 2) {
             playerList.setLength(playerList.length() - 2);
         }
         broadcast(playerList.toString());
     }
-    public static void resetLobby() {
-        System.out.println("All players have left. Resetting lobby and game data...");
 
-        broadcast("All players left. The lobby is reset.");
+    // ===== Методы для передачи в GameManager (обработка угадывания и т.п.) =====
 
-        lobbyCreated = false;
-        lobbyPassword = null;
-        maxPlayers = 0;
-
-        gameEnded = false;
-        currentDrawer = null;
-        currentWord = null;
-        currentRound = 0;
-        totalRounds = 0;
-
-        scores.clear();
+    public void onCorrectGuess(ClientHandler guesser, String currentWord) {
+        broadcast("Player " + guesser.getNickname() + " guessed the word! The word was: " + currentWord);
     }
+
+    public void onScoresUpdated(String scoresString) {
+        broadcast("Score update: " + scoresString);
+    }
+
+    public void onTimeIsUp(String currentWord) {
+        broadcast("Time is up! The word was: " + currentWord);
+    }
+
+    public void onClearCanvas() {
+        broadcast("CLEAR_CANVAS");
+    }
+
+    public void onGameEnded(String finalScores) {
+        broadcast("GAME_ENDED");
+        broadcast("Game over! Thanks for playing.");
+        broadcast("Final scores: " + finalScores);
+        System.out.println("Game over! All rounds completed.");
+    }
+    public GameManager getGameManager() {
+        return gameManager;
+    }
+
+    public List<ClientHandler> getClients() {
+        return clients;
+        // или, ещё лучше:
+        // return Collections.unmodifiableList(clients);
+    }
+
+
 }

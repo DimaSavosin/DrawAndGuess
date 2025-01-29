@@ -11,11 +11,11 @@ public class ClientHandler implements Runnable {
     private String nickname;
     private boolean ready = false;
 
-    private List<ClientHandler> clients;
+    private Server server; // ссылка на наш сервер
 
-    public ClientHandler(Socket socket, List<ClientHandler> clients) {
+    public ClientHandler(Socket socket, Server server) {
         this.socket = socket;
-        this.clients = clients;
+        this.server = server;
     }
 
     @Override
@@ -30,108 +30,111 @@ public class ClientHandler implements Runnable {
                 return;
             }
 
+            // Разбираем, CREATE LOBBY / JOIN LOBBY
             if (firstLine.startsWith("CREATE LOBBY")) {
-                if (Server.isLobbyCreated()) {
+                // Пример: CREATE LOBBY password 3
+                String[] parts = firstLine.split(" ");
+                if (parts.length != 4) {
+                    out.println("ERROR WRONG_COMMAND");
+                    socket.close();
+                    return;
+                }
+                String password = parts[2];
+                int maxPlayers;
+                try {
+                    maxPlayers = Integer.parseInt(parts[3]);
+                } catch (NumberFormatException e) {
+                    out.println("ERROR INVALID_PLAYERS_NUMBER");
+                    socket.close();
+                    return;
+                }
+                if (maxPlayers < 2 || maxPlayers > 4) {
+                    out.println("ERROR INVALID_PLAYERS_NUMBER");
+                    socket.close();
+                    return;
+                }
+                // Пытаемся создать
+                boolean created = server.tryCreateLobby(password, maxPlayers);
+                if (!created) {
                     out.println("ERROR LOBBY_EXISTS");
                     socket.close();
                     return;
-                } else {
-                    String[] parts = firstLine.split(" ");
-                    if (parts.length != 4) {
-                        out.println("ERROR WRONG_COMMAND");
-                        socket.close();
-                        return;
-                    }
-                    String password = parts[2];
-                    int maxPlayers;
-                    try {
-                        maxPlayers = Integer.parseInt(parts[3]);
-                    } catch (NumberFormatException e) {
-                        out.println("ERROR INVALID_PLAYERS_NUMBER");
-                        socket.close();
-                        return;
-                    }
-                    if (maxPlayers < 2 || maxPlayers > 4) {
-                        out.println("ERROR INVALID_PLAYERS_NUMBER");
-                        socket.close();
-                        return;
-                    }
-                    Server.createLobby(password, maxPlayers);
-                    out.println("OK Lobby created");
                 }
+                out.println("OK Lobby created");
 
             } else if (firstLine.startsWith("JOIN LOBBY")) {
-                if (!Server.isLobbyCreated()) {
-                    out.println("ERROR NO_LOBBY_YET");
+                String[] parts = firstLine.split(" ");
+                if (parts.length != 3) {
+                    out.println("ERROR WRONG_COMMAND");
                     socket.close();
                     return;
-                } else {
-                    String[] parts = firstLine.split(" ");
-                    if (parts.length != 3) {
-                        out.println("ERROR WRONG_COMMAND");
-                        socket.close();
-                        return;
-                    }
-                    String password = parts[2];
-                    if (!Server.checkLobbyPassword(password)) {
-                        out.println("ERROR WRONG_PASSWORD");
-                        socket.close();
-                        return;
-                    }
-                    if (clients.size() >= Server.getMaxPlayers()) {
-                        out.println("ERROR LOBBY_FULL");
-                        socket.close();
-                        return;
-                    }
-                    out.println("OK Joined lobby");
+                }
+                String password = parts[2];
+                boolean joined = server.tryJoinLobby(password);
+                if (!joined) {
+                    out.println("ERROR WRONG_PASSWORD_OR_NO_LOBBY");
+                    socket.close();
+                    return;
                 }
 
+                // Проверяем кол-во мест
+                if (server.getMaxPlayers() > 0) {
+                    // Можно проверить, не заполнено ли лобби
+                    // Но это уже на уровне server.addClient
+                }
+
+                out.println("OK Joined lobby");
             } else {
                 out.println("ERROR UNKNOWN_COMMAND");
                 socket.close();
                 return;
             }
+
+            // Теперь ждем ник
             while (true) {
                 nickname = in.readLine();
                 if (nickname == null) {
                     break;
                 }
+                // Здесь можно проверить уникальность ника среди server.clients
                 if (isNicknameUnique(nickname)) {
                     ready = true;
-                    Server.addClient(this);
+                    // Добавляем клиента в список
+                    server.addClient(this);
 
                     System.out.println(nickname + " joined the game.");
-                    Server.broadcast(nickname + " has joined the game.");
-                    Server.sendPlayerList();
-                    Server.checkAndStartGame();
+                    server.broadcast(nickname + " has joined the game.");
+                    server.sendPlayerList();
                     break;
                 } else {
                     out.println("Nickname already in use. Please enter a different one.");
                 }
             }
 
+            // Обработка дальнейших сообщений
             String message;
             while ((message = in.readLine()) != null) {
-                if (Server.isGameEnded()) {
-                    Server.broadcast(nickname + ": " + message);
-                    continue;
-                }
+                // Проверяем, кто рисует, и т.д. – узнаём у GameManager
+                // но для простоты оставим логику, как было:
 
+                // Если это команды рисования
                 if (message.startsWith("PRESS") || message.startsWith("DRAG")) {
-                    if (this == Server.getCurrentDrawer()) {
-                        Server.broadcastDrawCommand("DRAW " + message, this);
+                    // Проверяем, является ли этот клиент рисующим
+                    if (server.getGameManager().getCurrentDrawer() == this) {
+                        server.broadcastDrawCommand("DRAW " + message, this);
                     } else {
                         sendMessage("You cannot draw. You are not the drawer.");
                     }
                 } else if (message.equals("CLEAR_REQUEST")) {
-                    if (this == Server.getCurrentDrawer()) {
-                        Server.broadcast("CLEAR_CANVAS");
+                    if (server.getGameManager().getCurrentDrawer() == this) {
+                        server.broadcast("CLEAR_CANVAS");
                     } else {
                         sendMessage("You cannot clear the canvas. You are not the drawer.");
                     }
                 } else {
-                    if (Server.getCurrentDrawer() != this) {
-                        Server.handleGuess(message, this);
+                    // Значит, это попытка угадать слово
+                    if (server.getGameManager().getCurrentDrawer() != this) {
+                        server.getGameManager().handleGuess(message, this);
                     } else {
                         sendMessage("You are the drawer. You cannot guess.");
                     }
@@ -140,32 +143,25 @@ public class ClientHandler implements Runnable {
         } catch (IOException e) {
             System.out.println("Connection with " + nickname + " lost.");
         } finally {
-            try {
-                socket.close();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-            clients.remove(this);
-            if (nickname != null) {
-                Server.broadcast(nickname + " has left the game.");
-            }
-            Server.sendPlayerList();
-            Server.checkAndStartGame();
-            if (clients.isEmpty()) {
-                Server.resetLobby();
-            }
+            closeConnection();
         }
+    }
 
+    private void closeConnection() {
+        try {
+            socket.close();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        server.removeClient(this);
     }
 
     private boolean isNicknameUnique(String nickname) {
-        for (ClientHandler client : clients) {
-            if (client != this && client.getNickname() != null
-                    && client.getNickname().equalsIgnoreCase(nickname)) {
-                return false;
-            }
-        }
-        return true;
+        // Можно тоже у Server попросить список игроков,
+        // и там проверить.
+        // Для упрощения здесь через broadcast-список
+        return server.getClients().stream()
+                .noneMatch(ch -> ch != this && nickname.equalsIgnoreCase(ch.getNickname()));
     }
 
     public void sendMessage(String message) {
@@ -179,4 +175,6 @@ public class ClientHandler implements Runnable {
     public boolean isReady() {
         return ready;
     }
+
+
 }
